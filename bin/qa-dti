@@ -91,8 +91,6 @@ def main(nifti, bvec, bval, output_prefix, accel='n'):
 
     # run analyze_dti_phantom.m (matlab script)
     #Really ugly way of getting 2nd level parent directory (qcmon home directory) 
-    import pdb
-    pdb.set_trace() 
     output_path = os.path.abspath(output_prefix) 
     qcmon_base = os.path.abspath(os.path.join(os.path.realpath(__file__),os.path.pardir,os.path.pardir))
     matlab_path = os.path.join(qcmon_base,'assets/matlab')
