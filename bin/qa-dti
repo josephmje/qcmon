@@ -1,0 +1,139 @@
+#!/usr/bin/env python
+"""
+Compute an FA map of the input file, and then runs the included MATLAB
+'analyze_dti_phantom.m' script on these data.
+
+Usage: 
+    qa-dti [options] <nifti> <bvec> <bval> <output_prefix> 
+
+Arguments: 
+    <nifti>                     4D NIfTi volume, spherical phantom DTi scan 
+    <bvec>                      Associated bvec of DTi scan 
+    <bval>                      Associated bval of DTi scan 
+    <output_prefix>             Output folder of qc metrics 
+
+Optional: 
+    -v,--verbose                Verbose log output 
+    -a,--accel                  [y/n] Nyquist accelerated [default -n] 
+
+Outputs:
+    ${output_prefix}B0Distortion-NPAR.jpg
+    ${output_prefix}CentralSlice-NPAR.jpg
+    ${output_prefix}DiffImgs-NPAR.jpg
+    ${output_prefix}DiffMasks-NPAR.jpg
+    ${output_prefix}MaskCentralSlice-NPAR.jpg
+    ${output_prefix}NyquistRatio-NPAR.jpg
+    ${output_prefix}Plot-EddyCurrentDist-NPAR.jpg
+    ${output_prefix}Section2.3.1_SNR_ADC.csv
+    ${output_prefix}Section2.3.2_B0DistortionRatio.csv
+    ${output_prefix}Section2.3.3_EddyCurrentDistortions.csv
+    ${output_prefix}Section2.3.4_AveNyqRatio.csv
+    ${output_prefix}Section2.3.5_FAvalues.csv
+    ${output_prefix}SNRImgs-NPAR.jpg
+    ${output_prefix}SNRplots-NPAR.jpg
+    ${output_prefix}StdPlotsHist-NPAR.jpg
+
+Depends on FSL & MATLAB.
+Designed by Sofia Chavez, packaged and maintained by Joseph Viviano 2014-17.
+
+See qa-dti --help for usage.
+"""
+import os, sys
+import tempfile
+import shutil
+import logging
+import subprocess as proc
+import argparse
+from docopt import docopt
+
+logging.basicConfig(level=logging.WARN, format="[%(name)s] %(levelname)s: %(message)s")
+logger = logging.getLogger(os.path.basename(__file__))
+tmpdir = tempfile.mkdtemp(prefix='qa-dti-')
+
+
+def shutdown(returncode=0):
+    """removes temporary files and exits"""
+    shutil.rmtree(tmpdir)
+    sys.exit(returncode)
+
+
+def run(cmd):
+    """Runs commands in a subshell and returns error messages if there is a problem."""
+    p = proc.Popen(cmd, shell=True, stdout=proc.PIPE, stderr=proc.PIPE)
+    out, err = p.communicate()
+
+    logger.debug('{}:\n{}'.format(cmd, out))
+
+    if p.returncode != 0:
+        logger.error('{} failed with returncode {}.\nSTDERR: {}'.format(cmd, p.returncode, err))
+        shutdown(returncode=p.returncode)
+
+
+def main(nifti, bvec, bval, output_prefix, accel='n'):
+    """Runs FSL dtifit to generate an FA map before running analyze_dti_phantom.m"""
+
+    # preprocessing: make FA map
+    run('fslroi {nifti} {t}/tmp_b0.nii.gz 0 1'.format(nifti=nifti, t=tmpdir))
+    run('bet {t}/tmp_b0.nii.gz {t}/tmp_b0_bet.nii.gz -m -f 0.3 -R'.format(t=tmpdir))
+    run('dtifit -k {nifti} -m {t}/tmp_b0_bet_mask.nii.gz -r {bvec} -b {bval} -o {t}/dtifit'.format(
+                                   nifti=nifti, t=tmpdir, bvec=bvec, bval=bval))
+
+    # ensure FA map is in the tmp directory (.nii or .nii.gz)
+    fa = filter(lambda x: 'FA.nii' in x, os.listdir(tmpdir))
+
+    if len(fa) > 1:
+        logger.info('found multiple FA candidates {}, using {}'.format(fa, fa[0]))
+    elif len(fa) == 0:
+        logger.error('Failed to calculate FA from {}'.format(nifti))
+        logger.debug('Files found in {t}:\n{files}'.format(t=tmpdir, files=os.listdir(tmpdir)))
+        shutdown(returncode=1)
+    fa = os.path.join(tmpdir, fa[0])
+
+    # run analyze_dti_phantom.m (matlab script)
+    #Really ugly way of getting 2nd level parent directory (qcmon home directory) 
+    import pdb
+    pdb.set_trace() 
+    output_path = os.path.abspath(output_prefix) 
+    qcmon_base = os.path.abspath(os.path.join(os.path.realpath(__file__),os.path.pardir,os.path.pardir))
+    matlab_path = os.path.join(qcmon_base,'assets/matlab')
+    cmd = (r"addpath(genpath('{}')); analyze_dti_phantom('{}','{}','{}','{}','{}')".format(
+        matlab_path, nifti, fa, bval, output_path, accel))
+    run('matlab -nodisplay -nosplash -r "{}"'.format(cmd))
+
+    shutdown()
+
+
+if __name__ == '__main__':
+    logger.info('Starting')
+
+    #Parse arguments 
+    arguments = docopt(__doc__) 
+    nifti =                          arguments['<nifti>'] 
+    bval  =                          arguments['<bval>'] 
+    bvec  =                          arguments['<bvec>'] 
+    output=                          arguments['<output_prefix>'] 
+
+    verbose =                        arguments['--verbose'] 
+    accel   =                        arguments['--accel'] 
+
+    # debug mode
+    if verbose > 0:
+        logger.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.WARN)
+
+    # acceleration on/off
+    if not accel:
+        accel = 'n'
+    if accel not in ['y', 'n']:
+        logger.error('accel={} invalid, should be y/n'.format(accel))
+        shutdown(returncode=1)
+
+    # ensure output directory exists
+    output_dir = os.path.dirname(os.path.abspath(output))
+    if not os.path.isdir(output_dir):
+        logger.error('output directory {} does not exist.'.format(output_dir))
+        shutdown(returncode=1)
+
+    main(nifti, bvec, bval, output, accel=accel)
+
