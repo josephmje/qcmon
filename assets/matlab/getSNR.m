@@ -25,7 +25,7 @@ end
 
 
 ccroi=makecirc(128,65,65,30);
-e=edge(ccroi,'canny');
+e=edge(ccroi,'canny'); %edge detection 
 
 for i=1:nd
     tmp=Diffndwi(:,:,i);

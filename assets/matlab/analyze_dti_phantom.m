@@ -45,15 +45,15 @@ try
 
     % print headers
     fprintf(fid01, '%s,%s,%s,%s,%s\n', ...
-                   'AVE(SNR)0', '%CV(SNR)0', 'AVE(SNR)DWI','%CV(SNR)DWI', 'ADC');
+                   'aveSNR_b0', 'CoV_SNR_b0(%)', 'aveSNR_dwi','%CoV_SNR_dwi(%)', 'ADC');
     fprintf(fid02, '%s\n', ...
-                   'B0 Distortion Ratio');
+                   'b0_distortion_ratio');
     fprintf(fid03, '%s,%s\n', ...
-                   'avevoxshift','%errorvoxshift');
+                   'avevoxshift','percent_errorvoxshift');
     fprintf(fid04, '%s\n', ...
-                   'Nyquist Ratio');
+                   'AVENyqratio');
     fprintf(fid05, '%s,%s\n', ...
-                   'AVE(FA)','STD(FA)');
+                   'AVE FA','STD FA');
 
     % load DWI, averaging over 3 central slices. dim1,2=AXIAL, dim3=all directions)
     dims = size(dwi.vol);
