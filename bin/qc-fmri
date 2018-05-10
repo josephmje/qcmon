@@ -39,7 +39,7 @@ import scipy as sp
 import scipy.signal as sig
 import nibabel as nib
 
-logging.basicConfig(level=logging.WARN, format="[%(name)s] %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="[%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(os.path.basename(__file__))
 
 def main(nifti, prefix):
@@ -51,18 +51,21 @@ def main(nifti, prefix):
     os.environ['PATH'] += os.pathsep + qascriptsPath
 
     # pre-processing
+    logging.info('Running AFNI pre-processing suite')
     tmpdir = tempfile.mkdtemp(prefix='qc-')
     qc.utilities.run('3dvolreg -prefix {t}/mcorr.nii.gz -twopass -twoblur 3 -Fourier -1Dfile {t}/motion.1D {nifti}'.format(t=tmpdir, nifti=nifti))
     qc.utilities.run('3dTstat -prefix {t}/mean.nii.gz {t}/mcorr.nii.gz'.format(t=tmpdir))
     qc.utilities.run('3dAutomask -prefix {t}/mask.nii.gz -clfrac 0.5 -peels 3 {t}/mean.nii.gz'.format(t=tmpdir))
 
     # sfnr
+    logging.info('Running AFNI SFNR computations')
     qc.utilities.run('3dTstat -prefix {t}/std.nii.gz  -stdev {t}/mcorr.nii.gz'.format(t=tmpdir))
     qc.utilities.run("""3dcalc -prefix {prefix}_sfnr.nii.gz -a {t}/mean.nii.gz -b {t}/std.nii.gz -expr 'a/b'""".format(prefix=prefix, t=tmpdir))
     sfnr = qc.utilities.load_masked_data('{prefix}_sfnr.nii.gz'.format(prefix=prefix), '{t}/mask.nii.gz'.format(t=tmpdir))
     sfnr = np.mean(sfnr)
 
     # spectra
+    logging.info('Running spectra')
     func = qc.utilities.load_masked_data('{t}/mcorr.nii.gz'.format(t=tmpdir), '{t}/mask.nii.gz'.format(t=tmpdir))
     spec = sig.detrend(func, type='linear')
     spec = sig.periodogram(spec, fs=0.5, return_onesided=True, scaling='density')
@@ -70,6 +73,7 @@ def main(nifti, prefix):
     np.savetxt(prefix + '_spectra.csv', spec.T, header='freq,mean,sd', delimiter=',')
 
     # framewise displacement, doi: 10.1016/j.neuroimage.2011.10.018
+    logging.info('Frame-wise displacement')
     headRadius = 50   # assumed (in mm), for deg to rad conversion
     fdThreshold = 0.2 # fd threshold in mm
     fd = np.genfromtxt('{t}/motion.1D'.format(t=tmpdir))
@@ -82,11 +86,13 @@ def main(nifti, prefix):
     pctBadFd = numBadFd / float(len(fd))
 
     # write FD out as a two-column .csv file, including the TR number
+    logging.info('Writing to CSV file')
     np.savetxt(prefix + '_fd.csv', np.vstack((np.arange(len(fd)), fd)).T, delimiter=',', header='tr,fd', comments='')
 
     # whole brain correlation (global correlation)
     # https://afni.nimh.nih.gov/pub/dist/doc/program_help/@compute_gcor.html
     # calculate L2 norm of each time series
+    logging.info('Running whole brain correlation')
     dims = func.shape
     func = func - np.tile(np.mean(func, axis=1), (dims[1], 1)).T # demean
 
@@ -110,14 +116,22 @@ def main(nifti, prefix):
     out.to_filename(prefix + '_corr.nii.gz')
 
     # write out assorted statistics
+    logging.info('Writing statistics into csv')
     with open(prefix + '_stats.csv', 'wb') as f:
         f.write('mean_fd,n_bad_fd,%_bad_fd,global_corr,mean_sfnr\n{},{},{},{},{}'.format(
                  np.mean(fd), numBadFd, pctBadFd, gcorr, sfnr))
 
     # run metrics from qascripts toolchain
+    logging.info('Running metrics from qcscripts toolchain')
     qc.utilities.run('cp {nifti} {t}/raw.nii.gz'.format(nifti=nifti, t=tmpdir))
+
+    logging.info('Running qa_bold_v2')
     qc.utilities.run('qa_bold_v2.sh {t}/raw.nii.gz {t}/qc_bold.csv'.format(t=tmpdir))
+
+    logging.info('Moving qc_bold.csv into qc folder')
     qc.utilities.run('mv {t}/qc_bold.csv {prefix}_qascripts_bold.csv'.format(t=tmpdir, prefix=prefix))
+
+    logging.info('Finished processing...')
 
     shutil.rmtree(tmpdir)
 
