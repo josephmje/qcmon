@@ -92,12 +92,13 @@ def sample_centroids(data, radius=5):
     for prop in props:
         x = prop.centroid[0]
         y = prop.centroid[1]
-        roi = data[x, y]
+        roi = data[int(x), int(y)]
 
         # set region to be zero
         data = remove_region(data, roi)
 
         # place circle --  watch these indicies -- keep flipping)
+        # Create a mini mask in centre of ROI of radius = 5
         rr, cc = circle(int(y), int(x), 5, data.shape)
         data[cc, rr] = roi
 
@@ -149,21 +150,30 @@ def main(nifti, output):
 
     # random walker segmentation
     markers = np.zeros(data.shape, dtype=np.uint)
+
+    #Divide data into regions below and above mean intensity
     markers[data < np.mean(data)] = 1
     markers[data > np.mean(data)*2] = 2
+
+    #Run random_walker algorithm 
     labels = random_walker(data, markers, beta=10, mode='bf')
 
-    # number labeled regions (convert mask to E[0,1])
+    #Assign unique labels to connected components of minimum size 8 
     labels = label(labels, neighbors=8)
 
-    # retain the largest 5 rois
-    labels = retain_n_segments(labels, 5)
+    # retain the largest 5 rois, this include background which we want to ignore
+    labels = retain_n_segments(labels, 6)
+
+    #Remove background area
+    u_labels,u_counts = np.unique(labels,return_counts=True) 
+    background_label = u_labels[u_counts.argmax()] 
+    labels[labels == background_label] = 0 
 
     # generate QC output
     mask = np.where(labels == 0)
     plot = copy(data)
-    plot[mask] = 0
-    print_adni_qc(outputdir, plot, title)
+    plot[mask] = 0 #original image with unwanted ROIs removed
+    #print_adni_qc(outputdir, plot, title) #Save
 
     # find the central roi
     center = np.max(retain_n_segments(copy(labels), 1))
