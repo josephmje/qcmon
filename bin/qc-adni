@@ -37,7 +37,6 @@ from skimage.measure import label
 from skimage.segmentation import random_walker
 from skimage.draw import circle
 from skimage.measure import regionprops
-import pdb
 
 logging.basicConfig(level=logging.WARN, format="[%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(os.path.basename(__file__))
@@ -180,7 +179,6 @@ def main(nifti, output):
     center = np.max(retain_n_segments(copy(labels), 1))
 
     # set rois to have the same sized centroid sample
-    pdb.set_trace()
     labels = sample_centroids(labels, 10)
 
     # find quadrants (start in bottom lh corner, moving counter-clockwise)
