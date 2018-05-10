@@ -173,7 +173,7 @@ def main(nifti, output):
     mask = np.where(labels == 0)
     plot = copy(data)
     plot[mask] = 0 #original image with unwanted ROIs removed
-    #print_adni_qc(outputdir, plot, title) #Save
+    print_adni_qc(outputdir, plot, title) #Save
 
     # find the central roi
     center = np.max(retain_n_segments(copy(labels), 1))
