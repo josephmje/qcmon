@@ -38,6 +38,8 @@ from skimage.segmentation import random_walker
 from skimage.draw import circle
 from skimage.measure import regionprops
 
+import pdb
+
 logging.basicConfig(level=logging.WARN, format="[%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(os.path.basename(__file__))
 
@@ -123,31 +125,19 @@ def print_adni_qc(outputdir, data, title):
 
 def main(nifti, output):
 
-    logging.info('Starting')
 
-    title = copy(nifti)
-    outputdir = os.path.dirname(output)
+    pdb.set_trace() 
 
-    # load template from assets folder
-    template = os.path.join(os.path.dirname(os.path.realpath(__file__)), os.pardir, 'assets', 'adni-template.nii.gz')
-    if not os.path.isfile(template):
-        logger.error('{} not found'.format(template))
-        sys.exit(1)
-
-    # convert data to LPI orientation
-    tmpdir = tempfile.mkdtemp(prefix='adni-')
-    opts = '-searchrx -180 180 -searchry -180 180 -searchrz -180 180 -coarsesearch 30 -finesearch 9 -cost normcorr'
-    os.system('3daxialize -prefix {}/adni-lpi.nii.gz -orient LPI {}'.format(tmpdir, nifti))
-    os.system('flirt {opts} -in {tmpdir}/adni-lpi.nii.gz -ref {template} -out {tmpdir}/adni-lpi-reg.nii.gz'.format(opts=opts, tmpdir=tmpdir, template=template))
-
+    tmpdir = nifti
     # load data into ram
-    data = nib.load(os.path.join(tmpdir, 'adni-lpi-reg.nii.gz')).get_data() # import
-    os.system('rm -r {}'.format(tmpdir))
-
+    data = nib.load(tmpdir).get_data() # import
+    #os.system('rm -r {}'.format(tmpdir))
+    
     # reorient data
     data = data[:, :, data.shape[2]/2] # take central axial slice
     data = np.fliplr(np.rot90(data)) # rotate 90 deg --> flip l-r
 
+    
     # random walker segmentation
     markers = np.zeros(data.shape, dtype=np.uint)
 
@@ -173,7 +163,7 @@ def main(nifti, output):
     mask = np.where(labels == 0)
     plot = copy(data)
     plot[mask] = 0 #original image with unwanted ROIs removed
-    print_adni_qc(outputdir, plot, title) #Save
+    #print_adni_qc(outputdir, plot, title) #Save
 
     # find the central roi
     center = np.max(retain_n_segments(copy(labels), 1))
