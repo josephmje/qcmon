@@ -1,231 +1,350 @@
 #!/usr/bin/env python
-"""
-Usage:
-    qc-adni <nifti> <output>
+'''
+Usage: 
+    qc_adni_hpi [options] <nifti> <output_prefix>  
 
-    nifti -- full path to input T1-weighted scan of ADNI phantom.
-    output -- output .csv filename.
+Arguments: 
+    <nifti>                 Specify a single NIFTI file to be run 
+    <output_prefix>         Output path with nifti prefix 
 
-This computes the absoloute and relative T1 intensities of the 5 major orbs
-in the center of the ADNI phantom to get a measure of contrast stability over
-time. This is important as many anatomical measures (i.e., cortical thickness)
-depend on contrast being reliable.
+Options: 
+    -m, --mp4                       Output error overlay mp4 for checking spherical fits
+    -r, --valid_radii RADII_LIST              Specify a list of valid radii as: 'a,b,c,d'. [default = '15,30']
+    -h, --help                      Display help
+    -v, --verbose                   Verbose logging 
 
-Finds the 5 ROIs of interest using the random walker algorithm [1]. Uses the
-image mean as the lower threshold, and 2x the mean as an upper threshold.
+This qc pipeline computes the absolute and relative T1 intensities of the 5 major balls within
+the ADNI phantom. Reliability of contrast over time is key to anatomical measures such as 
+cortical thickness estimation. 
 
-Further, we find the 5 largest connected components. The mean of these
-masks are used as our ADNI samples and passed along for plotting.
+Method: 
+    (1) Spatial high pass filtering*
+    (2) Intensity filtering
+    (3) Spatial connected components clustering 
+    (4) Thresholding using estimated vs expected radius and intensity of high-passed image 
+    (5) Extracting sampling regions and closing morphological holes
+    (6) Contrast/Mean computation 
 
-This also calculates the relevant T1 ratios: s2/s1, s3/s1, s4/s1, s5/s1.
- http://scikit-image.org/docs/dev/auto_examples
+*Spatial high pass filtering is important for 64-channel coils. 64-channel coils induce an intensity gradient emanating inward from morphological edges which negatively impact image processing techniques relying on intensity values. We correct this by applying a gaussian kernel to the image and subtracting it from the original image. 
 
-[1] Random walks for image segmentation, Leo Grady, IEEE Trans.
-    Pattern Anal. Mach. Intell. 2006 Nov; 28(11):1768-83
-"""
+Written by: Jerry Jeyachandra 
+'''
+
 import os, sys
 import tempfile
 import logging
-from copy import copy
-import numpy as np
-import scipy as sp
-import nibabel as nib
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from skimage.measure import label
-from skimage.segmentation import random_walker
-from skimage.draw import circle
-from skimage.measure import regionprops
 
-logging.basicConfig(level=logging.WARN, format="[%(name)s] %(levelname)s: %(message)s")
+from subprocess import Popen, PIPE
+
+from skimage.morphology import erosion, dilation, reconstruction
+from skimage.measure import label, regionprops 
+from skimage.filters import gaussian as gauss_kernel
+
+import numpy as np
+import matplotlib.pyplot as plt 
+import matplotlib.animation as animation 
+
+import nibabel as nib
+
+from docopt import docopt 
+
+#Study directory
+data_dir = '/archive/data'
+
+logging.basicConfig(level=logging.WARN, 
+        format="[%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(os.path.basename(__file__))
 
-def remove_region(data, i):
-    """
-    Removes the ROIs containing the value i from the data.
-    """
-    x = data.shape[0]
-    y = data.shape[1]
+def animate_volume(vol,output,cmin=None,cmax=None,fps=15): 
+    '''
+    Given an MR-like volume generate a sliding animation across (assumed) LPI z-axis (viewing axial slices) 
+    '''
 
-    data = data.reshape(x * y)
-    idx = np.where(data == i)[0]
-    data[idx] = 0
-    data = data.reshape(x, y)
+    #If not cmin/cmax argument scale with volume
+    if (not cmin) and (not cmax): 
+        cmin = vol.min() 
+        cmax = vol.max() 
 
-    return data
+    #Plotting handlers
+    fig = plt.figure() 
+    ax = fig.add_subplot(111) 
+    artist_canvas = [] 
 
-def retain_n_segments(data, nseg):
-    """
-    This takes in a set of ROIs and returns the same set with only the top n
-    largest segments. All of the other regions will be replaced with zeros.
+    #Frame 1 initialization of artists
+    imslice = ax.imshow(np.zeros_like(vol[:,:,0]),vmin=cmin,vmax=cmax)
+    cbar = fig.colorbar(mappable=imslice) 
+    t = ax.annotate('start',(10,10), color='w') 
+    artist_canvas.append((imslice,t)) 
 
-    0 is treated as the background and is not considered.
-    """
-    # get the ROIs, create a size vector
-    rois = filter(lambda x: x > 0, np.unique(data))
-    sizes = np.zeros(len(rois))
+    #Slice through and update image/annotation
+    for sl in np.arange(0,vol.shape[2]): 
 
-    # find the size of each ROI
-    for i, roi in enumerate(rois):
-        sizes[i] = len(np.where(data == roi)[0])
+        imslice = ax.imshow(vol[:,:,sl],animated=True,vmin=cmin,vmax=cmax) 
+        t = ax.annotate(sl,(10,10),color='w') 
+        artist_canvas.append((imslice,t)) 
 
-    # sort smallest --> largest, find regions to remove
-    idx = np.argsort(sizes)
-    rois = np.array(rois)
-    rois = rois[idx]
-    idx = rois[0:-nseg]
+    #Write into .mp4 file at output
+    Writer = animation.writers['ffmpeg'] 
+    Writer = Writer(fps=fps,bitrate=1800) 
+    ani = animation.ArtistAnimation(fig,artist_canvas,blit=False,repeat_delay=500) 
 
-    # remove regions
-    for i in idx:
-        data = remove_region(data, i)
+    ani.save(output + '_spheres.mp4',writer=Writer) 
 
-    return data
+def filter_region_intensity(hf_vol,label_vol,valid_regions,num_return=5): 
+    '''
+    Filter labelled clusters based on intensities and expectation that adni balls 
+    are consistently greater in intensity compared to background (after high-passing the image)
 
-def sample_centroids(data, radius=5):
-    """
-    Takes in a label file and places equally-sized disks of radius r at each
-    ROIs centroid. This returns an ROI matrix with equally sized ROIs.
-    """
+    Arguments: 
+        hf_vol              High-passed volume after gaussian blur subtraction 
+        label_vol           Spatial clustered and labelled data
+        valid_regions       List of candidate skimage.morphology.regionprops to be filtered
+        num_return          Number of regions requested [default = 5] 
 
-    props = regionprops(data, intensity_image=None, cache=True)
-    for prop in props:
-        x = prop.centroid[0]
-        y = prop.centroid[1]
-        roi = data[int(x), int(y)]
+    Output: 
+        filtered_regions    List of regionprop objects of top [num_return] 
+    '''
 
-        # set region to be zero
-        data = remove_region(data, roi)
+    #Compute mean intensity of each region in list and sort in descending
+    region_scores = np.array([hf_vol[label_vol == region.label].mean() for region in valid_regions], dtype=np.int) 
+    region_order = np.argsort(-region_scores) 
 
-        # place circle --  watch these indicies -- keep flipping)
-        # Create a mini mask in centre of ROI of radius = 5
-        rr, cc = circle(int(y), int(x), 5, data.shape)
-        data[cc, rr] = roi
+    #Return top [num_return] regions from regionprop list
+    return [valid_regions[i] for i in region_order[:num_return]]
 
-    return data
+def validate_radii(r_radius,valid_radii,ep): 
+    '''
+    Checks whether region radius is within valid range 
+    '''
+    
+    return np.min(np.abs(valid_radii - r_radius)) < ep 
 
-def print_adni_qc(outputdir, data, title):
-    """
-    Prints out the ADNI intensity data to a folder.
-    """
-    # extract filename for title
-    title = os.path.basename(title)
+def filter_region_radius(rprop_list, valid_radii,ep=2): 
+    '''
+    Filter list of regions based on whether region matches the radius expected of the adni balls.  
 
-    maximum = np.max(data)
-    plt.imshow(data, cmap=plt.cm.jet, interpolation='nearest', vmin=0.15*maximum, vmax=0.75*maximum)
-    plt.colorbar()
-    plt.title(os.path.basename(title), fontsize=8)
-    plt.xticks([])
-    plt.yticks([])
-    plt.tight_layout()
-    plt.savefig(os.path.join(outputdir, '{}.jpg'.format(title)))
-    plt.close()
+    Arguments: 
+        rprop_list      List of skimage.morphology.regionprops to be filtered 
+        valid_radii     Iterable of expected radii to check for
+        ep              Epsilon threshold for mismatch 
 
-def main(nifti, output):
+    Output: 
+        List of regions that match expected radius 
+    '''
 
-    logging.info('Starting')
+    return [region for region in rprop_list 
+            if validate_radii(region.equivalent_diameter//2, valid_radii, ep)] 
 
-    title = copy(nifti)
-    outputdir = os.path.dirname(output)
 
-    # load template from assets folder
-    template = os.path.join(os.path.dirname(os.path.realpath(__file__)), os.pardir, 'assets', 'adni-template.nii.gz')
-    if not os.path.isfile(template):
-        logger.error('{} not found'.format(template))
-        sys.exit(1)
+def qc_adni_orbs(data,sph_masks): 
+    '''
+    Perform contrasting according to original ADNI phantom pipeline
 
-    # convert data to LPI orientation
-    tmpdir = tempfile.mkdtemp(prefix='adni-')
-    opts = '-searchrx -180 180 -searchry -180 180 -searchrz -180 180 -coarsesearch 30 -finesearch 9 -cost normcorr'
-    os.system('3daxialize -prefix {}/adni-lpi.nii.gz -orient LPI {}'.format(tmpdir, nifti))
-    os.system('flirt {opts} -in {tmpdir}/adni-lpi.nii.gz -ref {template} -out {tmpdir}/adni-lpi-reg.nii.gz'.format(opts=opts, tmpdir=tmpdir, template=template))
+    Arguments: 
+        data            Raw unfiltered volume 
+        sph_masks       List of embedded spheres to sample intensities from
 
-    # load data into ram
-    data = nib.load(os.path.join(tmpdir, 'adni-lpi-reg.nii.gz')).get_data() # import
-    os.system('rm -r {}'.format(tmpdir))
+    Outputs: 
+        sorted_means    List of ball intensities ordered in descending 
+        contrasts       Ratio of intensities relative to central (highest intensity) ball
+    '''
 
-    # reorient data
-    data = data[:, :, data.shape[2]/2] # take central axial slice
-    data = np.fliplr(np.rot90(data)) # rotate 90 deg --> flip l-r
+    #Sort orbs to get natural ordering 
+    mean_intensity = np.array([-data[mask].mean() for mask in sph_masks]) 
+    sort_ind = np.argsort(mean_intensity) 
+    mean_intensity = -mean_intensity[sort_ind] 
+    contrasts = np.divide(mean_intensity,mean_intensity[0])
 
-    # random walker segmentation
-    markers = np.zeros(data.shape, dtype=np.uint)
+    return mean_intensity, contrasts 
 
-    #Divide data into regions below and above mean intensity
-    markers[data < np.mean(data)] = 1
-    markers[data > np.mean(data)*2] = 2
+def axialize_LPI(nii_path): 
+    '''
+    Set orientation to primary axial, LPI and save into temporary directory 
+    
+    Arguments: 
+        nii_path        Full path to nifti file
 
-    #Run random_walker algorithm 
-    labels = random_walker(data, markers, beta=10, mode='bf')
+    Output: 
+        Full path to axialized nifti file
+    '''
+    
+    tmpdir = tempfile.mkdtemp(prefix='adni-') 
+    cmd = "3daxialize -prefix {}/adni-lpi.nii.gz -orient LPI {}".format(tmpdir,nii_path) 
+    p = Popen(cmd, stdout=PIPE, stderr=PIPE, shell=True)  
+    std, err = p.communicate()     
+    if p.returncode: 
+        pass #add logging
 
-    #Assign unique labels to connected components of minimum size 8 
-    labels = label(labels, neighbors=8)
+    return os.path.join(tmpdir,'adni-lpi.nii.gz')
 
-    # retain the largest 5 rois, this include background which we want to ignore
-    labels = retain_n_segments(labels, 6)
+def gauss_blur(vol,sig): 
+    '''
+    Apply gaussian blurring to a slice
 
-    #Remove background area
-    u_labels,u_counts = np.unique(labels,return_counts=True) 
-    background_label = u_labels[u_counts.argmax()] 
-    labels[labels == background_label] = 0 
+    Arguments: 
+        vol_slice           Single slice of volume
+        sig                 Gaussian sigma [default=1]
+    '''
 
-    # generate QC output
-    mask = np.where(labels == 0)
-    plot = copy(data)
-    plot[mask] = 0 #original image with unwanted ROIs removed
-    print_adni_qc(outputdir, plot, title) #Save
+    blur_vol = np.zeros_like(vol,dtype=np.float) 
 
-    # find the central roi
-    center = np.max(retain_n_segments(copy(labels), 1))
+    for i in np.arange(0,vol.shape[2]): 
+        blur_vol[:,:,i] = gauss_kernel(vol[:,:,i],sigma=sig,preserve_range=True)
 
-    # set rois to have the same sized centroid sample
-    labels = sample_centroids(labels, 10)
+    return blur_vol
 
-    # find quadrants (start in bottom lh corner, moving counter-clockwise)
-    x = labels.shape[1] / 2
-    y = labels.shape[0] / 2
 
-    q1 = labels[y:, 0:x]
-    q2 = labels[y:, x:]
-    q3 = labels[0:y, x:]
-    q4 = labels[0:y, 0:x]
+def write_error_record(axial_vol,sph_masks,output,scan): 
+    '''
+    Generates an mp4 record in output showing estimated spheres overlayed on axialized image 
 
-    # find the ball unique to each quadrant
-    idx1 = np.setdiff1d(np.unique(q1), center)
-    idx2 = np.setdiff1d(np.unique(q2), center)
-    idx3 = np.setdiff1d(np.unique(q3), center)
-    idx4 = np.setdiff1d(np.unique(q4), center)
+    Arguments: 
+        axial_vol       Axialized phantom volume 
+        sph_masks       List of ball masks [len(sph_masks) = # of balls]
+        output          Output directory 
 
-    # reshape the data to 1D for the last bit
-    x = data.shape[0]
-    y = data.shape[1]
-    data = data.reshape(x * y)
-    labels = labels.reshape(x * y)
+    Output: 
+        Saves {phantom}_error.mp4 in output directory
+    '''
+    
+    #Flatten list of sphere masks into one volume
+    error_vol = axial_vol.copy() 
 
-    # place mean intensity from each ROI into an raw_adni output array
-    adni = np.zeros(9)
+    #Rescale original volume to -1:1
+    error_vol = np.divide(error_vol,error_vol.max() - error_vol.min() )
 
-    idx = np.where(labels == idx1[1])[0]
-    adni[0] = np.mean(data[idx])
-    idx = np.where(labels == idx2[1])[0]
-    adni[1] = np.mean(data[idx])
-    idx = np.where(labels == idx3[1])[0]
-    adni[2] = np.mean(data[idx])
-    idx = np.where(labels == idx4[1])[0]
-    adni[3] = np.mean(data[idx])
-    idx = np.where(labels == np.array([center]))[0]
-    adni[4] = np.mean(data[idx])
+    sph_intensity = -error_vol.max() 
+    flattened_mask = sum([arr for arr in sph_masks]) == 1 
+    error_vol[flattened_mask] = sph_intensity 
 
-    # add in the ratios: s2/s1, s3/s1, s4/s1, s5/s1
-    adni[5] = adni[1] / adni[0]
-    adni[6] = adni[2] / adni[0]
-    adni[7] = adni[3] / adni[0]
-    adni[8] = adni[4] / adni[0]
+    #Generate mp4 for qcing the fit
+    animate_volume(error_vol,output) 
 
-    np.savetxt(output, adni)
+def close_gaps(vol): 
+    '''
+    Convenience function for applying image reconstruction to fill internal gaps 
+    Uses maximum of volume to find peaks and fill gap 
 
-if __name__ == '__main__':
-    if len(sys.argv) == 3:
-        main(sys.argv[1], sys.argv[2])
-    else:
-        print(__doc__)
+    Arguments: 
+        vol                 Volume to be filled 
+
+    Outputs: 
+        fill_vol            Filled volume 
+
+    See skimage.morphology.reconstruction for details
+    '''
+
+    #Initalize seed
+    seed = vol.copy() * 1
+    seed[1:-1,1:-1,1:-1] = seed.max()
+
+    return reconstruction(seed,vol,method='erosion') 
+
+def gen_sphere_masks(labels,region_list):
+    return (close_gaps(labels == region.label).astype(np.bool)
+            for region in region_list)
+
+def process_phantom(nifti,output_prefix,valid_radii,mp4=None): 
+    '''
+    Implementation of qc pipeline contrast/intensity extraction 
+
+    Arguments: 
+        nifti           Single phantom scan 
+        output          Output directory to store .mp4 quality check and qc to
+
+    '''
+    #Set up functionals
+    high_pass = lambda x: x - gauss_blur(x,sig=10) 
+    logger.info('QCing: {}'.format(nifti)) 
+
+    #Load in, axialize to LPI, save in tempdir 
+    axial_path = axialize_LPI(nifti)
+    axial_vol = nib.load(axial_path).get_data()
+
+    #Generate mask, clean noise, connect edges
+    logger.info('Generating mask...')
+    mask = high_pass(axial_vol) > np.percentile(high_pass(axial_vol),97)  
+    mask = dilation(dilation(erosion(mask))) 
+
+    #Apply mask and connected components clustering
+    logger.info('Applying mask...')
+    masked_vol = np.zeros_like(axial_vol,dtype=np.float)
+    masked_vol[mask] = gauss_blur(axial_vol,sig=1)[mask] 
+    masked_vol = erosion(erosion(masked_vol > 0)) * 1
+
+    logger.info('Identifying connected regions...')
+    label_vol = np.zeros_like(axial_vol,dtype=np.int)
+    label_vol = label(masked_vol)
+
+    #Criteria filtering
+    logger.info('Filtering regions...')
+    regions = regionprops(label_vol) 
+    valid_regions = filter_region_radius(regions,valid_radii) 
+    filtered_regions = filter_region_intensity(high_pass(axial_vol),label_vol,valid_regions) 
+
+    #Get ADNI contrasts from axialized volume 
+    logger.info('Computing contrasts and intensities...')
+    gen_sph_masks = gen_sphere_masks(label_vol,filtered_regions)
+    intensities, contrasts = qc_adni_orbs(axial_vol,gen_sph_masks)
+
+    if mp4: 
+        logger.info('Generating .mp4 video...')
+        gen_sph_masks = gen_sphere_masks(label_vol,filtered_regions)     
+        write_error_record(axial_vol,gen_sph_masks,output_prefix,scan)
+        logger.info('.mp4 video written to {}_spheres.mp4'.format(output_prefix))
+
+    logger.info('Writing qc report to: {}_stats.csv'.format(output_prefix))
+    write_report(intensities,contrasts,output_prefix)
+
+def write_report(intensities,contrasts,output): 
+    '''
+    Format and output csv 
+    
+    Arguments: 
+        intensities         Array of ordered mean intensities 
+        contrasts           Array of ordered mean contrasts 
+        output              Output directory 
+    '''
+
+    with open(output+'_stats.csv','w') as csv: 
+        
+        #Write header
+        int_header = ','.join(['int{}'.format(i+1) 
+            for i in range(len(intensities))])
+
+        cont_header = ','.join(['contrast{}'.format(i+1) 
+            for i in range(len(contrasts))])
+
+        full_header = int_header + ',' + cont_header 
+        csv.write(full_header + '\n') 
+        
+        #Write qc output
+        ints = ','.join([str(intensity) for intensity in intensities])
+        contrasts = ','.join([str(contrast) for contrast in contrasts])
+        full_row = ints + ',' + contrasts 
+        csv.write(full_row) 
+
+def main(): 
+
+    #Parse arguments
+    arguments = docopt(__doc__) 
+
+    nifti           =   arguments['<nifti>']
+    output_prefix   =   arguments['<output_prefix>']
+    
+    mp4             =   arguments['--mp4'] 
+    valid_radii     =   arguments['--valid_radii']
+
+    verbose         =   arguments['--verbose'] 
+
+    if verbose: logger.setLevel(logging.INFO) 
+
+    if valid_radii:
+        valid_radii = np.array(valid_radii.split(','),dtype=np.int)
+    else: 
+        valid_radii = np.array([14,28],dtype=np.int)
+
+    process_phantom(nifti,output_prefix,valid_radii,mp4) 
+
+if __name__ == '__main__': 
+    main() 
