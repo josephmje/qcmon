@@ -56,11 +56,6 @@ def float_to_int(filename):
 
     with open(filename,'w') as f: 
         f.write(write_str) 
-        
-        
-
-
-        
 
 def main(nifti, bvec, bval, output_prefix):
 
