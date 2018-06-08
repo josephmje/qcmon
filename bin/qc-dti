@@ -48,7 +48,6 @@ def float_to_int(filename):
     '''
 
     with open(filename,'r') as f: 
-
         raw_file = f.read().split(' ')
 
     int_list = [str(int(float(b))) for b in raw_file]
