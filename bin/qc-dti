@@ -42,6 +42,26 @@ def absmax(x):
     """
     return(np.max((np.abs(np.max(x)), np.abs(np.min(x)))))
 
+def float_to_int(filename): 
+    '''
+    Convert space delimited text file from float to int 
+    '''
+
+    with open(filename,'r') as f: 
+
+        raw_file = f.read().split(' ')
+
+    int_list = [str(int(float(b))) for b in raw_file]
+    write_str = ' '.join(int_list)  
+
+    with open(filename,'w') as f: 
+        f.write(write_str) 
+        
+        
+
+
+        
+
 def main(nifti, bvec, bval, output_prefix):
 
     # add qascript to path
@@ -53,6 +73,7 @@ def main(nifti, bvec, bval, output_prefix):
     qc.utilities.run('cp {nifti} {t}/dti.nii.gz'.format(nifti=nifti, t=tmpdir))
     qc.utilities.run('cp {bval} {t}/dti.bval'.format(bval=bval, t=tmpdir))
     qc.utilities.run('cp {bvec} {t}/dti.bvec'.format(bvec=bvec, t=tmpdir))
+    float_to_int(os.path.join(tmpdir,'dti.bval'))
     qc.utilities.run('qa_dti_v2.sh {t}/dti.nii.gz {t}/dti.bval {t}/dti.bvec {t}/qc_dti.csv'.format(t=tmpdir))
     qc.utilities.run('mv {t}/qc_dti.csv {output_prefix}_qascripts_dti.csv'.format(t=tmpdir, output_prefix=output_prefix))
 
