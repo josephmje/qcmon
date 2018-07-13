@@ -24,7 +24,7 @@ This might (should?) be moved to a dedicated configuration file at some point.
 import os, sys
 import collections
 import logging
-import dicom as dcm
+import pydicom as dcm
 import numpy as np
 
 logging.basicConfig(level=logging.WARN, format="[%(name)s] %(levelname)s: %(message)s")

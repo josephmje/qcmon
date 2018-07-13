@@ -17,7 +17,7 @@ import os, sys
 import csv
 import datetime
 import logging
-import dicom as dcm
+import pydicom as dcm
 
 logging.basicConfig(level=logging.WARN, format="[%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(os.path.basename(__file__))
@@ -75,4 +75,3 @@ if __name__ == '__main__':
         main(sys.argv[1], sys.argv[2])
     else:
         print(__doc__)
-
