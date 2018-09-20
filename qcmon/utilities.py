@@ -303,6 +303,6 @@ def run(cmd):
     out, err = p.communicate()
 
     if p.returncode != 0:
-        logger.error('{} failed with returncode {}.\nSTDERR: {}'.format(cmd, p.returncode, err))
+        logger.error('{} failed with returncode {}.\nSTDOUT: {}\nSTDERR: {}'.format(cmd, p.returncode, out, err))
         sys.exit(1)
 
